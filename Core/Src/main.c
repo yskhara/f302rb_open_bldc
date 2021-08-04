@@ -25,17 +25,17 @@
 #include <stdio.h>
 #include "math.h"
 #include "arm_math.h"
+#include "svpwm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define Q31(x) ((q31_t)(x * 2147483648))
-#define Q31_TO_F(x) ((float32_t)x / 2147483648)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -78,7 +78,7 @@ float theta = 0.0f;  // in rad
 float theta_hall = 0.0f;
 float gfOmega = 0.0f;  // in rad/s/pi
 q31_t gqwOmegaDt = 0;
-//q31_t gqwTheta = 0;		// electrical angle [-1, 1) is mapped to [-pi, pi) in radian or [-180, 180) in degrees
+q31_t gqwTheta = 0;		// electrical angle [-1, 1) is mapped to [-pi, pi) in radian or [-180, 180) in degrees
 q31_t gqwThetaHall = 0;
 uint8_t hall_pattern = 0x00;
 //float theta_at_edge[] = { 0, 2.0 * M_PI / 3.0, M_PI / 3.0, -2.0 * M_PI / 3.0, -M_PI / 3.0, M_PI };
@@ -102,9 +102,9 @@ float adv = M_PI;
 uint16_t aADC1ConvertedData[ADC_CONVERTED_DATA_BUFFER_SIZE];
 
 
-q31_t qwPhaseCurrent[3] = {0, 0, 0};
-q31_t qwCurrentAB[2] = {0, 0};
-q31_t qwCurrentDQ[2] = {0, 0};
+q31_t gaqwPhaseCurrent[3] = {0, 0, 0};
+q31_t gaqwCurrentAB[2] = {0, 0};
+q31_t gaqwCurrentDQ[2] = {0, 0};
 
 uint16_t uhVDDA = 0;
 uint16_t aAdcOffset[3] = {0,0,0};
@@ -115,7 +115,7 @@ char text[256];
 /*  0: DMA transfer is not completed                                          */
 /*  1: DMA transfer is completed                                              */
 /*  2: DMA transfer has not been started yet (initial state)                  */
-uint8_t ubAdc1DmaTransferCplt = 0; /* Variable set into DMA interruption callback */
+volatile uint8_t ubAdc1DmaTransferCplt = 0; /* Variable set into DMA interruption callback */
 
 //void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 //{
@@ -334,16 +334,50 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
 	}
 }
 
+
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if (htim->Instance == TIM1) {
 		// do nothing
 	} else if (htim->Instance == TIM6) {
+		GPIOB->BSRR = GPIO_BSRR_BS_2;
 		//q31_t qwOmegaDt = 0;
 		//float fOmegaDt = omega / M_PI * 1e-3;
 		//arm_float_to_q31(&fOmegaDt, &qwOmegaDt, 1);
 		//gqwTheta += gqwOmegaDt;
 		//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, (gqwTheta >> 20) ^ 0x800);
+		//q31_t qwThetaRT = gqwThetaHall + Q31(gfOmega * TIM2->CNT);
+		gqwTheta += Q31(0.03f);
+		q31_t qwThetaRT = gqwTheta;
+		//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, (qwThetaRT >> 20) ^ 0x800);
 
+
+		q31_t qwAdv =  Q31(0.7);
+		q31_t qwSines[3];
+		q31_t dummy;
+
+		arm_sin_cos_q31(qwThetaRT + qwAdv, &qwSines[0], &dummy);
+		arm_sin_cos_q31(qwThetaRT + Q31(2.0f / 3.0f) + qwAdv, &qwSines[1], &dummy);
+		arm_sin_cos_q31(qwThetaRT - Q31(2.0f / 3.0f) + qwAdv, &qwSines[2], &dummy);
+
+		//UVW uvw;
+		//SVPWM_Calc(gqwTheta, Q31(0.4f), &uvw);
+
+		//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, (qwSines[0] >> 20) ^ 0x800);
+		//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, (uvw.V >> 20) ^ 0x800);
+
+		if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != GPIO_PIN_RESET) {
+	//			TIM1->CCR1 = 1800.0 * sin(theta + adv);
+	//			TIM1->CCR2 = 1800.0 * sin(theta + 2.0 * M_PI / 3.0 + adv);
+	//			TIM1->CCR3 = 1800.0 * sin(theta - 2.0 * M_PI / 3.0 + adv);
+			TIM1->CCR1 = 500.0 + (int32_t)qwSines[0] * (100.0/0x80000000);
+			TIM1->CCR2 = 500.0 + (int32_t)qwSines[1] * (100.0/0x80000000);
+			TIM1->CCR3 = 500.0 + (int32_t)qwSines[2] * (100.0/0x80000000);
+			//TIM1->CCR1 = (int32_t)(uvw.U) * (1000.0/0x80000000);
+			//TIM1->CCR2 = (int32_t)(uvw.V) * (1000.0/0x80000000);
+			//TIM1->CCR3 = (int32_t)(uvw.W) * (1000.0/0x80000000);
+		}
+		GPIOB->BSRR = GPIO_BSRR_BR_2;
 	}
 }
 
@@ -356,38 +390,19 @@ void Adc1InjConvComplete_Callback(void) {
 //	qwPhaseCurrent[1] = ADC1->JDR2 << 16;
 //	qwPhaseCurrent[2] = ADC1->JDR3 << 16;
 
-	GPIOB->BSRR = GPIO_BSRR_BS_2;
-	qwPhaseCurrent[0] = ADC1->JDR1 << 16;
-	qwPhaseCurrent[1] = ADC1->JDR2 << 16;
-	LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, ((int32_t)(qwPhaseCurrent[0] * 10) >> 20) ^ 0x800);
+	gaqwPhaseCurrent[0] = ADC1->JDR1 << 16;
+	gaqwPhaseCurrent[1] = ADC1->JDR2 << 16;
+	//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, ((int32_t)(gaqwPhaseCurrent[0]) >> 20) ^ 0x800);
 
-	q31_t qwThetaRT = gqwThetaHall + Q31(gfOmega * TIM2->CNT);
-	//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, (qwThetaRT >> 20) ^ 0x800);
+	//q31_t qwThetaRT = gqwThetaHall + Q31(gfOmega * TIM2->CNT);
 
-	//q31_t qwSin, qwCos;
-	//arm_sin_cos_q31(gqwTheta, &qwSin, &qwCos);
-	//arm_clarke_q31(qwPhaseCurrent[0], qwPhaseCurrent[1], &qwCurrentAB[0], &qwCurrentAB[1]);
-	//arm_park_q31(qwCurrentAB[0], qwCurrentAB[1], &qwCurrentDQ[0], &qwCurrentDQ[1], qwSin, qwCos);
+	q31_t qwSin, qwCos;
+	arm_sin_cos_q31(gqwTheta, &qwSin, &qwCos);
+	arm_clarke_q31(gaqwPhaseCurrent[0], gaqwPhaseCurrent[1], &gaqwCurrentAB[0], &gaqwCurrentAB[1]);
+	arm_park_q31(gaqwCurrentAB[1], gaqwCurrentAB[0], &gaqwCurrentDQ[0], &gaqwCurrentDQ[1], qwSin, qwCos);
 
-
-	q31_t qwAdv =  Q31(0.7);
-	q31_t qwSines[3];
-	q31_t dummy;
-	arm_sin_cos_q31(qwThetaRT + qwAdv, &qwSines[0], &dummy);
-	arm_sin_cos_q31(qwThetaRT + Q31(2.0f / 3.0f) + qwAdv, &qwSines[1], &dummy);
-	arm_sin_cos_q31(qwThetaRT - Q31(2.0f / 3.0f) + qwAdv, &qwSines[2], &dummy);
-
-	//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, (qwSines[0] >> 20) ^ 0x800);
-
-	if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != GPIO_PIN_RESET) {
-//			TIM1->CCR1 = 1800.0 * sin(theta + adv);
-//			TIM1->CCR2 = 1800.0 * sin(theta + 2.0 * M_PI / 3.0 + adv);
-//			TIM1->CCR3 = 1800.0 * sin(theta - 2.0 * M_PI / 3.0 + adv);
-		TIM1->CCR1 = (int32_t)qwSines[0] * (500.0/0x80000000);
-		TIM1->CCR2 = (int32_t)qwSines[1] * (500.0/0x80000000);
-		TIM1->CCR3 = (int32_t)qwSines[2] * (500.0/0x80000000);
-	}
-	GPIOB->BSRR = GPIO_BSRR_BR_2;
+	//LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, ((int32_t)(gaqwCurrentAB[1]) >> 20) ^ 0x800);
+	LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, ((int32_t)(gaqwCurrentDQ[1]) >> 20) ^ 0x800);
 }
 
 /* USER CODE END 0 */
@@ -450,7 +465,7 @@ int main(void) {
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-	TIM1->CCR4 = 1995;
+	TIM1->CCR4 = 995;
 
 	HAL_TIM_Base_Start_IT(&htim6);
 
@@ -475,8 +490,8 @@ int main(void) {
 
 		//while(LL_ADC_REG_IsConversionOngoing(ADC1) != 0) ; // wait for conversion
 
-		while (ubAdc1DmaTransferCplt != 1)
-			;
+		//while (ubAdc1DmaTransferCplt != 1)
+		//	;
 
 		//uint16_t result = __LL_ADC_CALC_DATA_TO_VOLTAGE(3300,
 		//		aADC1ConvertedData[0], LL_ADC_RESOLUTION_12B);
@@ -489,12 +504,12 @@ int main(void) {
 		//i = sprintf(&text, "%04d, %04d, %04d\r\n", i_u, i_v, i_w);
 		//	sprintf(&text, "%d\r\n", hall_pattern);
 		//HAL_UART_Transmit(&huart2, text, i, 10);
-		float fPhaseCurrent[3] = {0.0f, 0.0f, 0.0f};
-		arm_q31_to_float(qwPhaseCurrent, fPhaseCurrent, 3);
+		//float fPhaseCurrent[3] = {0.0f, 0.0f, 0.0f};
+		//arm_q31_to_float(gaqwPhaseCurrent, fPhaseCurrent, 3);
 		sprintf(&text, "%07.4f, %07.3f, %07.3f, %07.3f\r\n", Q31_TO_F(gqwOmegaDt),
-				Q31_TO_F(qwPhaseCurrent[0])*19.83471074380165,
-				Q31_TO_F(qwPhaseCurrent[1])*19.83471074380165,
-				Q31_TO_F(qwPhaseCurrent[2])*19.83471074380165);
+				Q31_TO_F(gaqwPhaseCurrent[0])*19.83471074380165,
+				Q31_TO_F(gaqwPhaseCurrent[1])*19.83471074380165,
+				Q31_TO_F(gaqwPhaseCurrent[2])*19.83471074380165);
 		prints(&text);
 		//	sprintf(&text, "%d\r\n", hall_pattern);
 		//prints(&text);
@@ -819,7 +834,7 @@ static void MX_TIM1_Init(void) {
 	htim1.Instance = TIM1;
 	htim1.Init.Prescaler = 0;
 	htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
-	htim1.Init.Period = 2000 - 1;
+	htim1.Init.Period = 1000 - 1;
 	htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
 	htim1.Init.RepetitionCounter = 0;
 	htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
